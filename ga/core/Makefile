@@ -25,7 +25,8 @@ all: $(TARGET)
 
 OBJS =	ga-common.o ga-conf.o ga-confvar.o  ga-module.o ga-avcodec.o \
 	rtspconf.o pipeline.o vconverter.o \
-	vsource.o asource.o encoder-common.o controller.o server.o rtspserver.o
+	vsource.o asource.o encoder-common.o controller.o server.o rtspserver.o \
+	websocket/websocket.o websocket/sha1.o websocket/base64_enc.o
 
 libga.a: $(OBJS)
 	ar rc $@ $^

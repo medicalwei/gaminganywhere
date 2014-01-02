@@ -32,6 +32,7 @@
 
 #include "ga-common.h"
 #include "controller.h"
+#include "websocket/websocket.h"
 
 using namespace std;
 
@@ -382,7 +383,9 @@ ctrl_server_thread(void *rtspconf) {
 	int clientaccepted = 0;
 	//
 	unsigned char buf[8192];
-	int bufhead, buflen;
+	int bufhead;
+	size_t buflen;
+	int iswebsocket;
 
 	if(ctrl_server_init(conf, CTRL_CURRENT_VERSION) < 0) {
 		ga_error("controller server-thread: init failed, terminated.\n");
@@ -396,9 +399,11 @@ restart:
 	csinlen = sizeof(csin);
 	csin.sin_family = AF_INET;
 	clientaccepted = 0;
+	iswebsocket = 0;
 	// handle only one client
 	if(conf->ctrlproto == IPPROTO_TCP) {
 		struct ctrlhandshake *hh = (struct ctrlhandshake*) buf;
+		struct handshake wshandshake;
 		//
 		if((socket = accept(ctrlsocket, (struct sockaddr*) &csin, &csinlen)) < 0) {
 			ga_error("controller server-accept: %s.\n", strerror(errno));
@@ -412,6 +417,26 @@ restart:
 			close(socket);
 			goto restart;
 		}
+
+		/* websocket handler */
+		if(wsParseHandshake(buf, buflen, &wshandshake) == WS_OPENING_FRAME) {
+			ga_error("controller server-thread: dealing with websocket\n");
+			if(!wshandshake.subprotocol) {
+				ga_error("controller server-thread: websocket subprotocol not defined\n");
+				close(socket);
+				goto restart;
+			} else if(memcmp(myctrlid, wshandshake.subprotocol, strlen(myctrlid)) != 0) {
+				ga_error("controller server-thread: mismatched subprotocol version (%s != %s)\n",
+					wshandshake.subprotocol, myctrlid);
+				close(socket);
+				goto restart;
+			}
+			wsGetHandshakeAnswer(&wshandshake, buf, &buflen);
+			send(socket, buf, buflen, 0);
+			iswebsocket = 1;
+			goto start_receiving_events;
+		}
+
 		if(hh->length > buflen) {
 			ga_error("controller server-thread: bad handshake length (%d > %d)\n",
 				hh->length, buflen);
@@ -424,6 +449,7 @@ restart:
 			close(socket);
 			goto restart;
 		}
+start_receiving_events:
 		ga_error("controller server-thread: receiving events ...\n");
 		clientaccepted = 1;
 	}
@@ -431,7 +457,7 @@ restart:
 	buflen = 0;
 
 	while(true) {
-		int rlen, msglen;
+		size_t rlen, msglen;
 		//
 		bufhead = 0;
 		//
@@ -462,6 +488,23 @@ tcp_readmore:
 				//continue;
 			}
 		}
+
+		if(iswebsocket) {
+			uint8_t *wspayload;
+			size_t wslength;
+			enum wsFrameType wsframetype;
+			wsframetype = wsParseInputFrame(buf+bufhead, buflen, &wspayload, &wslength);
+			if(wsframetype == WS_BINARY_FRAME){
+				memmove(buf+bufhead, wspayload, wslength);
+				buflen = wslength;
+			} else if(wsframetype == WS_INCOMPLETE_FRAME) {
+				goto tcp_readmore;
+			} else {
+				close(socket);
+				goto restart;
+			}
+		}
+
 tcp_again:
 		if(buflen < 2) {
 			if(conf->ctrlproto == IPPROTO_TCP)
